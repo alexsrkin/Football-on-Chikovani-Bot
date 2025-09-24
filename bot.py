@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
+from typing import Optional   # добавить в импорты в начале файла
 
 # =========================
 # Config
@@ -124,7 +125,7 @@ async def get_nearest_event():
     events = await get_upcoming_events(limit=1)
     return events[0] if events else None
 
-async def upsert_participation(event_id: str, user_id: int, username: str | None,
+async def upsert_participation(event_id: str, user_id: int, username: Optional[str],
                                full_name: str, going: bool, extra_count: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
         # Старая запись удаляем
@@ -267,7 +268,7 @@ async def cmd_addevent(message: types.Message):
     except ValueError:
         await message.answer("Invalid format. Use: /addevent YYYY-MM-DD HH:MM")
 
-@router.message(Command("delevent")))
+@router.message(Command("delevent"))
 async def cmd_delevent(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -278,7 +279,7 @@ async def cmd_delevent(message: types.Message):
     await delete_event(parts[1])
     await message.answer("Event deleted.")
 
-@router.message(Command("set_place")))
+@router.message(Command("set_place"))
 async def cmd_set_place(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -296,7 +297,7 @@ async def cmd_set_place(message: types.Message):
         await db.commit()
     await message.answer(f"Place updated: <b>{new_place}</b>\nFor game: {fmt_dt(nearest['time'])}")
 
-@router.message(Command("set_time")))
+@router.message(Command("set_time"))
 async def cmd_set_time(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
