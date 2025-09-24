@@ -10,6 +10,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 from typing import Optional
+from aiogram.client.default import DefaultBotProperties  # ✅ новое
 
 # =========================
 # Config
@@ -18,16 +19,17 @@ API_TOKEN = os.getenv("API_TOKEN")  # ОБЯЗАТЕЛЬНО задать в Ren
 DB_PATH = "football_bot.db"
 
 DEFAULT_PLACE = "Chikovani St."
-TIMEZONE_SHIFT = 4  # GMT+4
+TIMEZONE_SHIFT = 4  # GMT+4 (Тбилиси)
 
 MAIN_CHAT_ID = -1001234567890   # ПОМЕНЯЙ на реальный id основного чата
-ADMIN_IDS = [1969502668, 192472924]
+
+ADMIN_IDS = [1969502668, 192472924]  # список админов
 
 # =========================
 # Aiogram / Scheduler
 # =========================
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-bot = Bot(token=API_TOKEN, parse_mode="HTML")
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))  # ✅ исправлено
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -111,6 +113,10 @@ async def get_upcoming_events(limit: int = 10):
                 for r in rows
             ]
 
+async def get_nearest_event():
+    events = await get_upcoming_events(limit=1)
+    return events[0] if events else None
+
 async def upsert_participation(event_id: str, user_id: int, username: Optional[str],
                                full_name: str, going: bool, extra_count: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -180,7 +186,6 @@ async def render_event(event_id: str) -> str:
 
     lines.append("")
     lines.append(f"<b>Not going ({len(not_going)})</b>:")
-
     if not_going:
         for username, full_name in not_going:
             name = f"@{username}" if username else (full_name or 'No name')
@@ -200,7 +205,7 @@ async def cmd_start(message: types.Message):
         "<b>Commands:</b>\n"
         "/events — list active games\n"
         "/addevent YYYY-MM-DD HH:MM — add custom event (admin)\n"
-        "/delevent EVENT_ID — delete an event (admin)\n"
+        "/delevent EVENT_ID — delete an event by ID (admin)\n"
         "/myid — show your Telegram ID\n"
         "/chatid — show this chat ID"
     )
@@ -219,7 +224,6 @@ async def cmd_events(message: types.Message):
     if not events:
         await message.answer("No active games.")
         return
-
     for ev in events:
         text = await render_event(ev["id"])
         await message.answer(text, reply_markup=join_keyboard(ev["id"]))
@@ -292,18 +296,22 @@ async def scheduled_create_48h():
     weekday = now_local.weekday()
 
     if weekday == 2:  # Wednesday -> Friday
-        target = now_local + timedelta(days=2)
+        delta_days = (4 - weekday)
+        target = now_local + timedelta(days=delta_days)
     elif weekday == 5:  # Saturday -> Monday
-        target = now_local + timedelta(days=2)
+        delta_days = (0 - weekday) % 7
+        target = now_local + timedelta(days=delta_days)
     else:
         return
 
     event_dt = target.replace(hour=21, minute=0, second=0, microsecond=0)
     event_id = await create_event(event_dt, DEFAULT_PLACE)
     text = await render_event(event_id)
-    await bot.send_message(MAIN_CHAT_ID,
-                           "⚽ <b>New game created!</b>\n\n" + text,
-                           reply_markup=join_keyboard(event_id))
+    await bot.send_message(
+        MAIN_CHAT_ID,
+        "⚽ <b>New game created!</b>\n\n" + text,
+        reply_markup=join_keyboard(event_id)
+    )
 
     reminder_time = event_dt - timedelta(hours=3)
     scheduler.add_job(send_reminder, "date", run_date=reminder_time, args=[event_id])
