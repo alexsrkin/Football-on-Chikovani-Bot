@@ -238,16 +238,16 @@ async def cmd_start(message: types.Message):
 async def cmd_myid(message: types.Message):
     await message.answer(f"Your Telegram ID is: <code>{message.from_user.id}</code>")
 
-@router.message(Command("chatid")))
+@router.message(Command("chatid"))
 async def cmd_chatid(message: types.Message):
     await message.answer(f"Chat ID is: <code>{message.chat.id}</code>")
 
-@router.message(Command("events")))
+@router.message(Command("events"))
 async def cmd_events(message: types.Message):
     text = await render_events_list(limit=20)
     await message.answer(text)
 
-@router.message(Command("addevent")))
+@router.message(Command("addevent"))
 async def cmd_addevent(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
