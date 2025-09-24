@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 from typing import Optional
-from aiogram.client.default import DefaultBotProperties   # для parse_mode
+from aiogram.client.default import DefaultBotProperties
 
 # =========================
 # Config
@@ -18,29 +18,18 @@ from aiogram.client.default import DefaultBotProperties   # для parse_mode
 API_TOKEN = os.getenv("API_TOKEN")  # ОБЯЗАТЕЛЬНО задать в Render -> Environment
 DB_PATH = "football_bot.db"
 
-# Базовые настройки
 DEFAULT_PLACE = "Chikovani St."
 TIMEZONE_SHIFT = 4  # GMT+4 (Тбилиси)
-# Авто-игры: только ПОНЕДЕЛЬНИК (0) и ПЯТНИЦА (4) в 21:00, создаются за 48 часов:
-#   В среду 21:00 => создаём игру на Пятницу 21:00
-#   В субботу 21:00 => создаём игру на Понедельник 21:00
 
-# Чаты
 MAIN_CHAT_ID = -1001234567890   # ПОМЕНЯЙ на реальный id основного чата
 
-# Админы
 ADMIN_IDS = [1969502668, 192472924]
 
 # =========================
 # Aiogram / Scheduler
 # =========================
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-
-bot = Bot(
-    token=API_TOKEN,
-    default=DefaultBotProperties(parse_mode="HTML")
-)
-
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -330,7 +319,7 @@ async def send_reminder(event_id: str):
     await bot.send_message(MAIN_CHAT_ID, "⏰ Reminder: Game soon!\n\n" + text)
 
 # =========================
-# HTTP keep-alive (Render web service)
+# HTTP keep-alive
 # =========================
 async def http_handle(_request):
     return web.Response(text="Bot is running")
@@ -348,7 +337,6 @@ async def start_http_server():
 # =========================
 async def main():
     await init_db()
-
     scheduler.add_job(
         scheduled_create_48h,
         "cron",
@@ -358,9 +346,7 @@ async def main():
         timezone="Asia/Tbilisi",
     )
     scheduler.start()
-
     asyncio.create_task(start_http_server())
-
     logging.info("Bot polling started")
     await dp.start_polling(bot)
 
