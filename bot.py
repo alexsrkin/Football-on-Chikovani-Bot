@@ -5,24 +5,28 @@ from datetime import datetime, timedelta
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, Router, types
-from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 from typing import Optional
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # =========================
 # Config
 # =========================
-API_TOKEN = os.getenv("API_TOKEN")  # ОБЯЗАТЕЛЬНО задать в Render -> Environment
+API_TOKEN = os.getenv("API_TOKEN")
 DB_PATH = "football_bot.db"
 
 DEFAULT_PLACE = "Chikovani St."
 TIMEZONE_SHIFT = 4  # GMT+4 (Тбилиси)
 
-MAIN_CHAT_ID = -1001234567890   # ПОМЕНЯЙ на реальный id чата
+MAIN_CHAT_ID = -1001234567890   # замени на реальный id чата
 ADMIN_IDS = [1969502668, 192472924]
+
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{os.getenv('RENDER_EXTERNAL_URL', 'https://football-on-chikovani-bot.onrender.com')}{WEBHOOK_PATH}"
 
 # =========================
 # Aiogram / Scheduler
@@ -76,7 +80,7 @@ async def create_event(event_dt: datetime, place: str) -> str:
         await db.commit()
     return event_id
 
-async def delete_event(event_id: str):
+async def delete_event(event_id: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM players WHERE event_id=?", (event_id,))
         await db.execute("DELETE FROM events WHERE id=?", (event_id,))
@@ -111,6 +115,10 @@ async def get_upcoming_events(limit: int = 10):
                 {"id": r[0], "time": datetime.fromisoformat(r[1]), "place": r[2]}
                 for r in rows
             ]
+
+async def get_nearest_event():
+    events = await get_upcoming_events(limit=1)
+    return events[0] if events else None
 
 async def upsert_participation(event_id: str, user_id: int, username: Optional[str],
                                full_name: str, going: bool, extra_count: int = 0):
@@ -181,6 +189,7 @@ async def render_event(event_id: str) -> str:
 
     lines.append("")
     lines.append(f"<b>Not going ({len(not_going)})</b>:")
+
     if not_going:
         for username, full_name in not_going:
             name = f"@{username}" if username else (full_name or 'No name')
@@ -219,9 +228,10 @@ async def cmd_events(message: types.Message):
     if not events:
         await message.answer("No active games.")
         return
+
     for ev in events:
         text = await render_event(ev["id"])
-        await message.answer(f"⚽ <b>Upcoming game!</b>\n\n{text}", reply_markup=join_keyboard(ev["id"]))
+        await message.answer(text, reply_markup=join_keyboard(ev["id"]))
 
 @router.message(Command("addevent"))
 async def cmd_addevent(message: types.Message):
@@ -236,7 +246,8 @@ async def cmd_addevent(message: types.Message):
         local_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
         event_id = await create_event(local_dt, DEFAULT_PLACE)
         text = await render_event(event_id)
-        await bot.send_message(MAIN_CHAT_ID, f"⚽ <b>New game created!</b>\n\n{text}", reply_markup=join_keyboard(event_id))
+        await bot.send_message(MAIN_CHAT_ID, f"⚽ <b>New game created!</b>\n\n{text}",
+                               reply_markup=join_keyboard(event_id))
     except ValueError:
         await message.answer("Invalid format. Use: /addevent YYYY-MM-DD HH:MM")
 
@@ -283,21 +294,28 @@ async def callbacks(callback: CallbackQuery):
         await callback.answer()
 
 # =========================
-# Scheduler
+# Scheduler tasks
 # =========================
 async def scheduled_create_48h():
     now_local = datetime.utcnow() + timedelta(hours=TIMEZONE_SHIFT)
     weekday = now_local.weekday()
-    if weekday == 2:
-        target = now_local + timedelta(days=2)
-    elif weekday == 5:
+
+    if weekday == 2:  # Wednesday
+        target = now_local + timedelta(days=(4 - weekday))
+    elif weekday == 5:  # Saturday
         target = now_local + timedelta(days=(0 - weekday) % 7)
     else:
         return
+
     event_dt = target.replace(hour=21, minute=0, second=0, microsecond=0)
     event_id = await create_event(event_dt, DEFAULT_PLACE)
     text = await render_event(event_id)
-    await bot.send_message(MAIN_CHAT_ID, "⚽ <b>New game created!</b>\n\n" + text, reply_markup=join_keyboard(event_id))
+    await bot.send_message(
+        MAIN_CHAT_ID,
+        "⚽ <b>New game created!</b>\n\n" + text,
+        reply_markup=join_keyboard(event_id)
+    )
+
     reminder_time = event_dt - timedelta(hours=3)
     scheduler.add_job(send_reminder, "date", run_date=reminder_time, args=[event_id])
 
@@ -306,29 +324,38 @@ async def send_reminder(event_id: str):
     await bot.send_message(MAIN_CHAT_ID, "⏰ Reminder: Game soon!\n\n" + text)
 
 # =========================
-# HTTP keep-alive
+# Main with webhook
 # =========================
-async def http_handle(_request):
-    return web.Response(text="Bot is running")
+async def on_startup(bot: Bot):
+    await bot.set_webhook(WEBHOOK_URL)
 
-async def start_http_server():
+async def main():
+    await init_db()
+
+    scheduler.add_job(
+        scheduled_create_48h,
+        "cron",
+        day_of_week="wed,sat",
+        hour=21,
+        minute=0,
+        timezone="Asia/Tbilisi",
+    )
+    scheduler.start()
+
     app = web.Application()
-    app.router.add_get("/", http_handle)
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
     await site.start()
 
-# =========================
-# Main
-# =========================
-async def main():
-    await init_db()
-    scheduler.add_job(scheduled_create_48h, "cron", day_of_week="wed,sat", hour=21, minute=0, timezone="Asia/Tbilisi")
-    scheduler.start()
-    asyncio.create_task(start_http_server())
-    logging.info("Bot polling started")
-    await dp.start_polling(bot)
+    logging.info(f"Webhook set at {WEBHOOK_URL}")
+    await on_startup(bot)
+
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
