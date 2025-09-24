@@ -229,10 +229,10 @@ async def callback_handler(callback: CallbackQuery):
 async def scheduled_create_48h():
     now = datetime.utcnow() + timedelta(hours=TIMEZONE_SHIFT)
     weekday = now.weekday()
-    if weekday == 2:  # Wednesday
-        target = now + timedelta(days=(4 - weekday))  # Friday
-    elif weekday == 5:  # Saturday
-        target = now + timedelta(days=(0 - weekday) % 7)  # Monday
+    if weekday == 2:  # Wednesday → create Friday game
+        target = now + timedelta(days=(4 - weekday))
+    elif weekday == 5:  # Saturday → create Monday game
+        target = now + timedelta(days=(0 - weekday) % 7)
     else:
         return
 
@@ -250,6 +250,18 @@ async def send_reminder(event_id):
     text = await render_event(event_id)
     await bot.send_message(MAIN_CHAT_ID, f"⏰ Reminder: Game soon!\n\n{text}")
 
+# ====== HTTP server for Render ======
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000)))
+    await site.start()
+
 # ====== Main ======
 async def main():
     await init_db()
@@ -263,22 +275,11 @@ async def main():
     )
     scheduler.start()
     logging.info("Bot polling started")
-    await dp.start_polling(bot)
 
-# ====== Web Server for Render ======
-async def handle(request):
-    return web.Response(text="Bot is running")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000)))
-    await site.start()
+    loop = asyncio.get_event_loop()
+    loop.create_task(dp.start_polling(bot))
+    loop.create_task(start_web_server())
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(main())          # запускаем бота
-    loop.create_task(start_web_server())  # запускаем веб-сервер
-    loop.run_forever()
+    asyncio.run(main())
