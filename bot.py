@@ -245,8 +245,14 @@ async def cmd_chatid(message: types.Message):
 
 @router.message(Command("events"))
 async def cmd_events(message: types.Message):
-    text = await render_events_list(limit=20)
-    await message.answer(text)
+    events = await get_upcoming_events(limit=10)
+    if not events:
+        await message.answer("No active games.")
+        return
+
+    for ev in events:
+        text = await render_event(ev["id"])
+        await message.answer(text, reply_markup=join_keyboard(ev["id"]))
 
 @router.message(Command("addevent"))
 async def cmd_addevent(message: types.Message):
