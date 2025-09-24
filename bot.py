@@ -266,3 +266,22 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+import asyncio
+from aiohttp import web
+
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000)))
+    await site.start()
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())          # запускаем бота
+    loop.create_task(start_web_server())  # запускаем веб-сервер
+    loop.run_forever()
