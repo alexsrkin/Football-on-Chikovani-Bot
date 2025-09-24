@@ -9,7 +9,8 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
-from typing import Optional   # для Optional[str]
+from typing import Optional
+from aiogram.client.default import DefaultBotProperties   # для parse_mode
 
 # =========================
 # Config
@@ -20,18 +21,26 @@ DB_PATH = "football_bot.db"
 # Базовые настройки
 DEFAULT_PLACE = "Chikovani St."
 TIMEZONE_SHIFT = 4  # GMT+4 (Тбилиси)
+# Авто-игры: только ПОНЕДЕЛЬНИК (0) и ПЯТНИЦА (4) в 21:00, создаются за 48 часов:
+#   В среду 21:00 => создаём игру на Пятницу 21:00
+#   В субботу 21:00 => создаём игру на Понедельник 21:00
 
 # Чаты
 MAIN_CHAT_ID = -1001234567890   # ПОМЕНЯЙ на реальный id основного чата
 
 # Админы
-ADMIN_IDS = [1969502668, 192472924]  # ты и ещё админ
+ADMIN_IDS = [1969502668, 192472924]
 
 # =========================
 # Aiogram / Scheduler
 # =========================
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-bot = Bot(token=API_TOKEN, parse_mode="HTML")
+
+bot = Bot(
+    token=API_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
+
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -67,7 +76,7 @@ async def init_db():
         await db.commit()
 
 # =========================
-# Utilities (DB helpers)
+# Utilities
 # =========================
 async def create_event(event_dt: datetime, place: str) -> str:
     event_id = str(datetime.now().timestamp())
@@ -114,10 +123,6 @@ async def get_upcoming_events(limit: int = 10):
                 {"id": r[0], "time": datetime.fromisoformat(r[1]), "place": r[2]}
                 for r in rows
             ]
-
-async def get_nearest_event():
-    events = await get_upcoming_events(limit=1)
-    return events[0] if events else None
 
 async def upsert_participation(event_id: str, user_id: int, username: Optional[str],
                                full_name: str, going: bool, extra_count: int = 0):
@@ -300,9 +305,11 @@ async def scheduled_create_48h():
     weekday = now_local.weekday()
 
     if weekday == 2:  # Wednesday
-        target = now_local + timedelta(days=(4 - weekday))
+        delta_days = (4 - weekday)
+        target = now_local + timedelta(days=delta_days)
     elif weekday == 5:  # Saturday
-        target = now_local + timedelta(days=(0 - weekday) % 7)
+        delta_days = (0 - weekday) % 7
+        target = now_local + timedelta(days=delta_days)
     else:
         return
 
