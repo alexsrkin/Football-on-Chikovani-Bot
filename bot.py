@@ -234,7 +234,7 @@ async def cmd_start(message: types.Message):
         "/chatid — show this chat ID"
     )
 
-@router.message(Command("myid")))
+@router.message(Command("myid"))
 async def cmd_myid(message: types.Message):
     await message.answer(f"Your Telegram ID is: <code>{message.from_user.id}</code>")
 
