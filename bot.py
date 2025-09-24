@@ -3,24 +3,23 @@ import logging
 import asyncio
 import aiosqlite
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types, Router, F
+from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ====== Configuration (env-first) ======
-API_TOKEN = os.environ["API_TOKEN"]  # обязательно укажи в Render
+# ====== Config ======
+API_TOKEN = os.getenv("API_TOKEN")  # токен берем из Render Environment
 DB_PATH = "football_bot.db"
 
 DEFAULT_GAME_DAYS = [0, 4]  # Monday=0, Friday=4
 DEFAULT_GAME_TIME = "21:00"
 DEFAULT_PLACE = "Chikovani St."
 TIMEZONE_SHIFT = 4  # GMT+4
-PLAYER_LIMIT = 20   # max players
 
-MAIN_CHAT_ID = int(os.getenv("MAIN_CHAT_ID", "-1001234567890"))
-TEN_LARI_CHAT_ID = int(os.getenv("TEN_LARI_CHAT_ID", "-1001234567891"))
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "1969502668").split(",")]
+MAIN_CHAT_ID = -1001234567890   # заменить на реальный id чата
+TEN_LARI_CHAT_ID = -1001234567891  # заменить на реальный id чата
+ADMIN_IDS = [1969502668, 192472924]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN, parse_mode="HTML")
@@ -30,141 +29,126 @@ dp.include_router(router)
 
 scheduler = AsyncIOScheduler()
 
-
-# ====== Database initialization ======
+# ====== DB ======
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+        await db.execute('''
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
                 time DATETIME,
                 place TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                is_active BOOLEAN DEFAULT 1
+                is_active BOOLEAN DEFAULT 1,
+                ten_lari_chat_opened BOOLEAN DEFAULT 0
             )
-        """)
-        await db.execute("""
+        ''')
+        await db.execute('''
             CREATE TABLE IF NOT EXISTS players (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT,
                 user_id INTEGER,
                 username TEXT,
                 full_name TEXT,
-                status TEXT,  -- "yes" / "no"
+                position TEXT,
                 extra_count INTEGER DEFAULT 0,
+                going BOOLEAN,
                 joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (event_id) REFERENCES events (id)
             )
-        """)
+        ''')
         await db.commit()
 
-
-# ====== Helpers ======
+# ====== Utilities ======
 async def create_event(event_time, place):
     event_id = str(datetime.now().timestamp())
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO events (id,time,place) VALUES (?,?,?)",
-            (event_id, event_time.isoformat(), place),
+            'INSERT INTO events (id,time,place) VALUES (?,?,?)',
+            (event_id, event_time.isoformat(), place)
         )
         await db.commit()
     return event_id
 
+async def delete_event(event_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('DELETE FROM events WHERE id=?', (event_id,))
+        await db.execute('DELETE FROM players WHERE event_id=?', (event_id,))
+        await db.commit()
 
-async def get_active_events():
+async def get_event_info(event_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT id, time, place FROM events WHERE is_active=1 ORDER BY time"
+            'SELECT time, place, ten_lari_chat_opened FROM events WHERE id=?',
+            (event_id,)
         ) as cursor:
-            return await cursor.fetchall()
-
+            row = await cursor.fetchone()
+            if row:
+                return {
+                    'time': datetime.fromisoformat(row[0]),
+                    'place': row[1],
+                    'ten_lari_chat_opened': bool(row[2])
+                }
+            return None
 
 async def get_event_players(event_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT user_id, username, full_name, status, extra_count "
-            "FROM players WHERE event_id=? ORDER BY joined_at",
-            (event_id,),
+            'SELECT username, full_name, position, extra_count, going '
+            'FROM players WHERE event_id=? ORDER BY joined_at',
+            (event_id,)
         ) as cursor:
             return await cursor.fetchall()
 
-
-async def set_player(event_id, user_id, username, full_name, status, extra_count=0):
+async def join_event(event_id, user_id, username, full_name, position, extra_count, going):
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('DELETE FROM players WHERE event_id=? AND user_id=?', (event_id, user_id))
         await db.execute(
-            "DELETE FROM players WHERE event_id=? AND user_id=?",
-            (event_id, user_id),
-        )
-        await db.execute(
-            "INSERT INTO players (event_id,user_id,username,full_name,status,extra_count) "
-            "VALUES (?,?,?,?,?,?)",
-            (event_id, user_id, username, full_name, status, extra_count),
+            'INSERT INTO players (event_id,user_id,username,full_name,position,extra_count,going) '
+            'VALUES (?,?,?,?,?,?,?)',
+            (event_id, user_id, username, full_name, position, extra_count, going)
         )
         await db.commit()
-
-
-async def remove_player(event_id, user_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM players WHERE event_id=? AND user_id=?", (event_id, user_id))
-        await db.commit()
-
-
-async def get_event_info(event_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT time, place FROM events WHERE id=?", (event_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return {"time": datetime.fromisoformat(row[0]), "place": row[1]}
-    return None
-
 
 # ====== Keyboards ======
 def create_join_keyboard(event_id):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton("✅ Going", callback_data=f"join_{event_id}_yes_0")],
-            [InlineKeyboardButton("❌ Not going", callback_data=f"join_{event_id}_no_0")],
-            [InlineKeyboardButton("+1", callback_data=f"extra_{event_id}_1"),
-             InlineKeyboardButton("+2", callback_data=f"extra_{event_id}_2")],
-        ]
-    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("✅ Going", callback_data=f"join_{event_id}_yes")],
+        [InlineKeyboardButton("❌ Not going", callback_data=f"join_{event_id}_no")],
+        [InlineKeyboardButton("➕1", callback_data=f"extra_{event_id}_1"),
+         InlineKeyboardButton("➕2", callback_data=f"extra_{event_id}_2"),
+         InlineKeyboardButton("➕3", callback_data=f"extra_{event_id}_3")]
+    ])
+    return kb
 
-
-def create_extra_keyboard(event_id, extra_count):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton("Confirm + going", callback_data=f"join_{event_id}_yes_{extra_count}")],
-            [InlineKeyboardButton("Back", callback_data=f"back_{event_id}")],
-        ]
-    )
-
-
-# ====== Render ======
+# ====== Render Event ======
 async def render_event(event_id):
-    info = await get_event_info(event_id)
-    if not info:
+    event = await get_event_info(event_id)
+    if not event:
         return "Event not found"
-
     players = await get_event_players(event_id)
-    going = [p for p in players if p[3] == "yes"]
-    notgoing = [p for p in players if p[3] == "no"]
 
-    text = (
-        f"⚽ <b>Game:</b> {info['time'].strftime('%d.%m %H:%M')}\n"
-        f"📍 <b>Place:</b> {info['place']}\n\n"
-        f"✅ Going: {len(going)} / {PLAYER_LIMIT}\n"
-        f"❌ Not going: {len(notgoing)}\n\n"
-    )
+    going = [p for p in players if p[4]]
+    not_going = [p for p in players if p[4] == 0]
 
+    text = f"⚽ <b>Game:</b> {event['time'].strftime('%d.%m %H:%M')}\n📍 <b>Place:</b> {event['place']}\n\n"
+    text += f"<b>Going ({len(going)}/20):</b>\n"
     if going:
-        text += "<b>Players:</b>\n"
-        for _, username, full_name, _, extra in going:
+        for username, full_name, position, extra_count, going_flag in going:
             name = f"@{username}" if username else full_name
-            extra_txt = f" +{extra}" if extra > 0 else ""
-            text += f"✔️ {name}{extra_txt}\n"
+            extra_text = f" +{extra_count}" if extra_count else ""
+            text += f"✅ {name}{extra_text}\n"
+    else:
+        text += "Nobody yet 👀\n"
+
+    text += f"\n<b>Not going ({len(not_going)}):</b>\n"
+    if not_going:
+        for username, full_name, _, _, _ in not_going:
+            name = f"@{username}" if username else full_name
+            text += f"❌ {name}\n"
+    else:
+        text += "Nobody declined.\n"
 
     return text
-
 
 # ====== Commands ======
 @router.message(Command("start"))
@@ -172,118 +156,113 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "⚽ <b>Hello! I'm your football bot.</b>\n\n"
         "<b>Commands:</b>\n"
-        "/create - create a game manually (admin)\n"
+        "/create - create a game manually\n"
         "/events - list active games\n"
         "/addevent - add custom event (admin)\n"
         "/delevent - delete an event by ID (admin)\n"
+        "/set_place - change game place (admin)\n"
+        "/set_time - change game time (admin)\n"
+        "/open_10lari - open registration in 10 Lari chat (admin)\n"
         "/myid - show your Telegram ID\n"
         "/chatid - show this chat ID"
     )
 
-
 @router.message(Command("myid"))
 async def cmd_myid(message: types.Message):
-    await message.answer(f"Your Telegram ID: <code>{message.from_user.id}</code>")
-
+    await message.answer(f"Your Telegram ID is: {message.from_user.id}")
 
 @router.message(Command("chatid"))
 async def cmd_chatid(message: types.Message):
-    await message.answer(f"Chat ID: <code>{message.chat.id}</code>")
+    await message.answer(f"Chat ID is: {message.chat.id}")
 
-
-@router.message(Command("events"))
-async def cmd_events(message: types.Message):
-    events = await get_active_events()
-    if not events:
-        await message.answer("No active events")
-        return
-    for eid, _, _ in events:
-        txt = await render_event(eid)
-        await message.answer(txt, reply_markup=create_join_keyboard(eid))
-
-
-# Admin-only
 @router.message(Command("addevent"))
 async def cmd_addevent(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    parts = message.text.split(maxsplit=2)
+    parts = message.text.split()
     if len(parts) < 3:
-        await message.answer("Usage: /addevent YYYY-MM-DD HH:MM Place")
+        await message.answer("Usage: /addevent YYYY-MM-DD HH:MM")
         return
-    dt_str, time_str, place = parts[1], parts[2].split()[0], " ".join(parts[2].split()[1:])
-    dt = datetime.fromisoformat(f"{dt_str} {time_str}")
-    eid = await create_event(dt, place or DEFAULT_PLACE)
-    txt = await render_event(eid)
-    await bot.send_message(MAIN_CHAT_ID, f"New custom game created!\n\n{txt}", reply_markup=create_join_keyboard(eid))
-
+    dt_str = f"{parts[1]} {parts[2]}"
+    try:
+        event_time = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+        event_id = await create_event(event_time, DEFAULT_PLACE)
+        text = await render_event(event_id)
+        await bot.send_message(MAIN_CHAT_ID, text, reply_markup=create_join_keyboard(event_id))
+    except ValueError:
+        await message.answer("Invalid format. Use YYYY-MM-DD HH:MM")
 
 @router.message(Command("delevent"))
 async def cmd_delevent(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     parts = message.text.split()
-    if len(parts) < 2:
+    if len(parts) != 2:
         await message.answer("Usage: /delevent EVENT_ID")
         return
-    eid = parts[1]
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE events SET is_active=0 WHERE id=?", (eid,))
-        await db.commit()
-    await message.answer(f"Event {eid} deleted")
-
+    await delete_event(parts[1])
+    await message.answer("Event deleted.")
 
 # ====== Callbacks ======
 @router.callback_query()
 async def callback_handler(callback: CallbackQuery):
-    data = callback.data.split("_")
-    action = data[0]
-    eid = data[1]
+    data = callback.data.split('_')
+    action, event_id = data[0], data[1]
+
+    full_name = f"{callback.from_user.first_name or ''} {callback.from_user.last_name or ''}".strip()
 
     if action == "join":
-        status, extra = data[2], int(data[3])
-        full_name = f"{callback.from_user.first_name or ''} {callback.from_user.last_name or ''}".strip()
-        await set_player(eid, callback.from_user.id, callback.from_user.username, full_name, status, extra)
-        txt = await render_event(eid)
-        await callback.message.edit_text(txt, reply_markup=create_join_keyboard(eid))
+        going = data[2] == "yes"
+        await join_event(event_id, callback.from_user.id, callback.from_user.username, full_name, None, 0, going)
+        text = await render_event(event_id)
+        await callback.message.edit_text(text, reply_markup=create_join_keyboard(event_id))
         await callback.answer("Updated!")
-
     elif action == "extra":
-        extra = int(data[2])
-        await callback.message.edit_reply_markup(reply_markup=create_extra_keyboard(eid, extra))
-        await callback.answer()
-
-    elif action == "back":
-        await callback.message.edit_reply_markup(reply_markup=create_join_keyboard(eid))
-        await callback.answer()
-
+        extra_count = int(data[2])
+        await join_event(event_id, callback.from_user.id, callback.from_user.username, full_name, None, extra_count, True)
+        text = await render_event(event_id)
+        await callback.message.edit_text(text, reply_markup=create_join_keyboard(event_id))
+        await callback.answer(f"Added +{extra_count}")
 
 # ====== Scheduler ======
 async def scheduled_create_48h():
     now = datetime.utcnow() + timedelta(hours=TIMEZONE_SHIFT)
     weekday = now.weekday()
-
-    if weekday == 2:  # Wed → create Friday
-        target = now + timedelta(days=(4 - weekday))
-    elif weekday == 5:  # Sat → create Monday
-        target = now + timedelta(days=(7 - weekday))
+    if weekday == 2:  # Wednesday
+        target = now + timedelta(days=(4 - weekday))  # Friday
+    elif weekday == 5:  # Saturday
+        target = now + timedelta(days=(0 - weekday) % 7)  # Monday
     else:
         return
 
-    target = target.replace(hour=21, minute=0, second=0, microsecond=0)
-    eid = await create_event(target, DEFAULT_PLACE)
-    txt = await render_event(eid)
-    await bot.send_message(MAIN_CHAT_ID, f"⚽ New game!\n\n{txt}", reply_markup=create_join_keyboard(eid))
+    event_datetime = target.replace(hour=21, minute=0, second=0, microsecond=0)
+    event_id = await create_event(event_datetime, DEFAULT_PLACE)
+    text = await render_event(event_id)
+    await bot.send_message(MAIN_CHAT_ID, f"⚽ <b>New game created!</b>\n\n{text}",
+                           reply_markup=create_join_keyboard(event_id))
 
+    # reminder за 3 часа
+    reminder_time = event_datetime - timedelta(hours=3)
+    scheduler.add_job(send_reminder, "date", run_date=reminder_time, args=[event_id])
+
+async def send_reminder(event_id):
+    text = await render_event(event_id)
+    await bot.send_message(MAIN_CHAT_ID, f"⏰ Reminder: Game soon!\n\n{text}")
 
 # ====== Main ======
 async def main():
     await init_db()
-    scheduler.add_job(scheduled_create_48h, "cron", day_of_week="wed,sat", hour=21, timezone="Asia/Tbilisi")
+    scheduler.add_job(
+        scheduled_create_48h,
+        "cron",
+        day_of_week="wed,sat",
+        hour=21,
+        minute=0,
+        timezone="Asia/Tbilisi"
+    )
     scheduler.start()
     logging.info("Bot polling started")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
