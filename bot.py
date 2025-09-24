@@ -76,6 +76,12 @@ async def delete_event(event_id):
         await db.execute('DELETE FROM players WHERE event_id=?', (event_id,))
         await db.commit()
 
+async def get_active_events():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT id, time, place FROM events ORDER BY time') as cursor:
+            rows = await cursor.fetchall()
+            return rows
+
 async def get_event_info(event_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -108,6 +114,16 @@ async def join_event(event_id, user_id, username, full_name, position, extra_cou
             'VALUES (?,?,?,?,?,?,?)',
             (event_id, user_id, username, full_name, position, extra_count, going)
         )
+        await db.commit()
+
+async def update_event_place(event_id, new_place):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('UPDATE events SET place=? WHERE id=?', (new_place, event_id))
+        await db.commit()
+
+async def update_event_time(event_id, new_time):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('UPDATE events SET time=? WHERE id=?', (new_time.isoformat(), event_id))
         await db.commit()
 
 # ====== Keyboards ======
@@ -204,6 +220,65 @@ async def cmd_delevent(message: types.Message):
     await delete_event(parts[1])
     await message.answer("Event deleted.")
 
+@router.message(Command("create"))
+async def cmd_create(message: types.Message):
+    event_time = datetime.now() + timedelta(days=1)
+    event_time = event_time.replace(hour=21, minute=0, second=0, microsecond=0)
+    event_id = await create_event(event_time, DEFAULT_PLACE)
+    text = await render_event(event_id)
+    await bot.send_message(MAIN_CHAT_ID, text, reply_markup=create_join_keyboard(event_id))
+
+@router.message(Command("events"))
+async def cmd_events(message: types.Message):
+    events = await get_active_events()
+    if not events:
+        await message.answer("No active games.")
+        return
+    text = "<b>Active games:</b>\n\n"
+    for eid, time, place in events:
+        text += f"ID: {eid}\n🕒 {time}\n📍 {place}\n\n"
+    await message.answer(text)
+
+@router.message(Command("set_place"))
+async def cmd_set_place(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Usage: /set_place EVENT_ID PLACE")
+        return
+    await update_event_place(parts[1], parts[2])
+    await message.answer("Place updated.")
+
+@router.message(Command("set_time"))
+async def cmd_set_time(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split()
+    if len(parts) < 3:
+        await message.answer("Usage: /set_time EVENT_ID YYYY-MM-DD HH:MM")
+        return
+    try:
+        new_time = datetime.strptime(f"{parts[2]} {parts[3]}", "%Y-%m-%d %H:%M")
+        await update_event_time(parts[1], new_time)
+        await message.answer("Time updated.")
+    except Exception:
+        await message.answer("Invalid format. Use: /set_time EVENT_ID YYYY-MM-DD HH:MM")
+
+@router.message(Command("open_10lari"))
+async def cmd_open_10lari(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Usage: /open_10lari EVENT_ID")
+        return
+    event_id = parts[1]
+    text = await render_event(event_id)
+    await bot.send_message(TEN_LARI_CHAT_ID, f"⚽ <b>10 Lari registration open!</b>\n\n{text}",
+                           reply_markup=create_join_keyboard(event_id))
+    await message.answer("Opened in 10 Lari chat.")
+
 # ====== Callbacks ======
 @router.callback_query()
 async def callback_handler(callback: CallbackQuery):
@@ -229,10 +304,10 @@ async def callback_handler(callback: CallbackQuery):
 async def scheduled_create_48h():
     now = datetime.utcnow() + timedelta(hours=TIMEZONE_SHIFT)
     weekday = now.weekday()
-    if weekday == 2:  # Wednesday → create Friday game
-        target = now + timedelta(days=(4 - weekday))
-    elif weekday == 5:  # Saturday → create Monday game
-        target = now + timedelta(days=(0 - weekday) % 7)
+    if weekday == 2:  # Wednesday
+        target = now + timedelta(days=(4 - weekday))  # Friday
+    elif weekday == 5:  # Saturday
+        target = now + timedelta(days=(0 - weekday) % 7)  # Monday
     else:
         return
 
@@ -250,18 +325,6 @@ async def send_reminder(event_id):
     text = await render_event(event_id)
     await bot.send_message(MAIN_CHAT_ID, f"⏰ Reminder: Game soon!\n\n{text}")
 
-# ====== HTTP server for Render ======
-async def handle(request):
-    return web.Response(text="Bot is running")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000)))
-    await site.start()
-
 # ====== Main ======
 async def main():
     await init_db()
@@ -275,11 +338,22 @@ async def main():
     )
     scheduler.start()
     logging.info("Bot polling started")
+    await dp.start_polling(bot)
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(dp.start_polling(bot))
-    loop.create_task(start_web_server())
-    await asyncio.Event().wait()
+# ====== HTTP Server for Render ======
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000)))
+    await site.start()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())          # запускаем бота
+    loop.create_task(start_web_server())  # запускаем веб-сервер
+    loop.run_forever()
