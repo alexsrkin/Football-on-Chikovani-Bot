@@ -9,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
-from typing import Optional   # добавить в импорты в начале файла
+from typing import Optional   # для Optional[str]
 
 # =========================
 # Config
@@ -20,13 +20,9 @@ DB_PATH = "football_bot.db"
 # Базовые настройки
 DEFAULT_PLACE = "Chikovani St."
 TIMEZONE_SHIFT = 4  # GMT+4 (Тбилиси)
-# Авто-игры: только ПОНЕДЕЛЬНИК (0) и ПЯТНИЦА (4) в 21:00, создаются за 48 часов:
-#   В среду 21:00 => создаём игру на Пятницу 21:00
-#   В субботу 21:00 => создаём игру на Понедельник 21:00
 
 # Чаты
 MAIN_CHAT_ID = -1001234567890   # ПОМЕНЯЙ на реальный id основного чата
-# TEN_LARI_CHAT_ID сейчас не используем
 
 # Админы
 ADMIN_IDS = [1969502668, 192472924]  # ты и ещё админ
@@ -46,7 +42,6 @@ scheduler = AsyncIOScheduler()
 # =========================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # События
         await db.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
@@ -56,7 +51,6 @@ async def init_db():
                 is_active BOOLEAN DEFAULT 1
             )
         """)
-        # Игроки/голосования
         await db.execute("""
             CREATE TABLE IF NOT EXISTS players (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,12 +122,10 @@ async def get_nearest_event():
 async def upsert_participation(event_id: str, user_id: int, username: Optional[str],
                                full_name: str, going: bool, extra_count: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Старая запись удаляем
         await db.execute(
             "DELETE FROM players WHERE event_id=? AND user_id=?",
             (event_id, user_id)
         )
-        # Добавляем
         await db.execute(
             "INSERT INTO players (event_id, user_id, username, full_name, extra_count, going) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -168,8 +160,6 @@ def join_keyboard(event_id: str) -> InlineKeyboardMarkup:
 # Render helpers
 # =========================
 def fmt_dt(dt: datetime) -> str:
-    # Человеческий формат, без угловых скобок (чтобы не ломать HTML)
-    # Пример: Fri, 27 Sep 21:00
     return dt.strftime("%a, %d %b %H:%M")
 
 async def render_event(event_id: str) -> str:
@@ -208,16 +198,6 @@ async def render_event(event_id: str) -> str:
 
     return "\n".join(lines)
 
-async def render_events_list(limit: int = 10) -> str:
-    events = await get_upcoming_events(limit=limit)
-    if not events:
-        return "No active games."
-
-    lines = ["<b>Active games:</b>", ""]
-    for e in events:
-        lines.append(f"• {fmt_dt(e['time'])} — {e['place']}")
-    return "\n".join(lines)
-
 # =========================
 # Commands
 # =========================
@@ -227,8 +207,6 @@ async def cmd_start(message: types.Message):
         "⚽ <b>Hello! I'm your football bot.</b>\n\n"
         "<b>Commands:</b>\n"
         "/events — list active games\n"
-        "/set_place PLACE — change place for the nearest game (admin)\n"
-        "/set_time YYYY-MM-DD HH:MM — change date & time for the nearest game (admin)\n"
         "/addevent YYYY-MM-DD HH:MM — add custom event (admin)\n"
         "/delevent EVENT_ID — delete an event by ID (admin)\n"
         "/myid — show your Telegram ID\n"
@@ -264,9 +242,7 @@ async def cmd_addevent(message: types.Message):
         return
     dt_str = f"{parts[1]} {parts[2]}"
     try:
-        # время считаем как локальное GMT+4
         local_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-        # Сохраняем как локальное (в БД хранится ISO, мы всегда добавляем TZ вручную при расчётах)
         event_id = await create_event(local_dt, DEFAULT_PLACE)
         text = await render_event(event_id)
         await bot.send_message(MAIN_CHAT_ID, f"⚽ <b>New game created!</b>\n\n{text}",
@@ -284,47 +260,6 @@ async def cmd_delevent(message: types.Message):
         return
     await delete_event(parts[1])
     await message.answer("Event deleted.")
-
-@router.message(Command("set_place"))
-async def cmd_set_place(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("Usage: /set_place PLACE")
-        return
-    new_place = parts[1].strip()
-    nearest = await get_nearest_event()
-    if not nearest:
-        await message.answer("No upcoming games to update.")
-        return
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE events SET place=? WHERE id=?", (new_place, nearest["id"]))
-        await db.commit()
-    await message.answer(f"Place updated: <b>{new_place}</b>\nFor game: {fmt_dt(nearest['time'])}")
-
-@router.message(Command("set_time"))
-async def cmd_set_time(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("Usage: /set_time YYYY-MM-DD HH:MM")
-        return
-    dt_str = f"{parts[1]} {parts[2]}"
-    try:
-        new_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-    except ValueError:
-        await message.answer("Invalid format. Use: /set_time YYYY-MM-DD HH:MM")
-        return
-    nearest = await get_nearest_event()
-    if not nearest:
-        await message.answer("No upcoming games to update.")
-        return
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE events SET time=? WHERE id=?", (new_dt.isoformat(), nearest["id"]))
-        await db.commit()
-    await message.answer(f"Time updated to: <b>{fmt_dt(new_dt)}</b>")
 
 # =========================
 # Callbacks
@@ -361,24 +296,15 @@ async def callbacks(callback: CallbackQuery):
 # Scheduler tasks
 # =========================
 async def scheduled_create_48h():
-    """
-    Запускается по крону:
-      - Среда 21:00 (Asia/Tbilisi) -> создаём Пятница 21:00
-      - Суббота 21:00 (Asia/Tbilisi) -> создаём Понедельник 21:00
-    """
     now_local = datetime.utcnow() + timedelta(hours=TIMEZONE_SHIFT)
-    weekday = now_local.weekday()  # 0=Mon ... 6=Sun
+    weekday = now_local.weekday()
 
     if weekday == 2:  # Wednesday
-        # Найти ближайшую пятницу этой недели
-        delta_days = (4 - weekday)  # 2 дня
-        target = now_local + timedelta(days=delta_days)
+        target = now_local + timedelta(days=(4 - weekday))
     elif weekday == 5:  # Saturday
-        # Следующий понедельник
-        delta_days = (0 - weekday) % 7  # 2 дня до понедельника
-        target = now_local + timedelta(days=delta_days)
+        target = now_local + timedelta(days=(0 - weekday) % 7)
     else:
-        return  # Не наша точка запуска
+        return
 
     event_dt = target.replace(hour=21, minute=0, second=0, microsecond=0)
     event_id = await create_event(event_dt, DEFAULT_PLACE)
@@ -389,7 +315,6 @@ async def scheduled_create_48h():
         reply_markup=join_keyboard(event_id)
     )
 
-    # Напоминание за 3 часа до игры
     reminder_time = event_dt - timedelta(hours=3)
     scheduler.add_job(send_reminder, "date", run_date=reminder_time, args=[event_id])
 
@@ -417,7 +342,6 @@ async def start_http_server():
 async def main():
     await init_db()
 
-    # План: два cron-триггера — среда и суббота 21:00 Asia/Tbilisi
     scheduler.add_job(
         scheduled_create_48h,
         "cron",
@@ -428,7 +352,6 @@ async def main():
     )
     scheduler.start()
 
-    # поднимем http-сервер, чтобы Render не спал
     asyncio.create_task(start_http_server())
 
     logging.info("Bot polling started")
