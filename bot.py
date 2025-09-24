@@ -3,10 +3,11 @@ import logging
 import asyncio
 import aiosqlite
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram import Bot, Dispatcher, Router, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 
 # ====== Config ======
 API_TOKEN = os.getenv("API_TOKEN")  # токен берем из Render Environment
@@ -264,11 +265,7 @@ async def main():
     logging.info("Bot polling started")
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
-    asyncio.run(main())
-import asyncio
-from aiohttp import web
-
+# ====== Web Server for Render ======
 async def handle(request):
     return web.Response(text="Bot is running")
 
